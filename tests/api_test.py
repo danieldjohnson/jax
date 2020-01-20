@@ -1789,19 +1789,6 @@ class CustomDerivativesTest(jtu.JaxTestCase):
     g = grad(f)(10., 5.)
     self.assertAllClose(g, 2. * (1. + 5.), check_dtypes=False)
 
-  def test_custom_vjp_nondiff_arg(self):
-    # see https://github.com/google/jax/issues/1366
-    def fwd(f, x):
-      return f(x), x
-    def bwd(argnums, x, g):
-      assert argnums == (1,), argnums
-      return x * g
-    f = api.custom_vjp(fwd, bwd)
-
-    self.assertAllClose(f(lambda x: 2 * x, 3.), 6., check_dtypes=False)
-    self.assertAllClose(api.grad(f, 1)(lambda x: 2 * x, 3.), 3.,
-                        check_dtypes=False)
-
   def test_custom_jvp(self):
     def fwd(x):
       return np.sin(x), np.cos(x)
@@ -1814,6 +1801,36 @@ class CustomDerivativesTest(jtu.JaxTestCase):
                         (np.sin(3.), 2 * np.cos(3.)),
                         check_dtypes=True)
     self.assertAllClose(api.grad(f)(3.), 2 * np.cos(3.), check_dtypes=True)
+
+  def test_custom_jvp_invariance(self):
+    def fwd(x):
+        return 2 * x, None
+    def jvp(aux, g):
+        return 3 * g
+    f = jax.custom_jvp(fwd, jvp)
+
+    def f2(x):
+        y, _ = jax.jvp(f, (x,), (x,))
+        return y
+
+    x = 1.
+    self.assertAllClose(jax.jvp(f, (x,), (x,)),
+                        jax.jvp(f2, (x,), (x,)),
+                        check_dtypes=False)
+
+  # TODO
+  # def test_custom_vjp_nondiff_arg(self):
+  #   # see https://github.com/google/jax/issues/1366
+  #   def fwd(f, x):
+  #     return f(x), x
+  #   def bwd(argnums, x, g):
+  #     assert argnums == (1,), argnums
+  #     return x * g
+  #   f = api.custom_vjp(fwd, bwd)
+
+  #   self.assertAllClose(f(lambda x: 2 * x, 3.), 6., check_dtypes=False)
+  #   self.assertAllClose(api.grad(f, 1)(lambda x: 2 * x, 3.), 3.,
+  #                       check_dtypes=False)
 
 
 if __name__ == '__main__':

@@ -1533,9 +1533,6 @@ def _custom_call_bind(primitive, f, *args, **params):
   f = _check_for_env_traces(f, level)
   if top_trace is None:
     with core.new_sublevel():
-      # If we hit the impl, it means there was no differentiation to trigger the
-      # custom jvp/vjp rule, so we just call the primal function and ignore res.
-      assert params['keep_res'] is False
       return primitive.impl(f, *args, **params)
   else:
     tracers = map(top_trace.full_raise, args)
@@ -1613,15 +1610,12 @@ ad.primitive_transposes[ad.custom_linearized_p] = _custom_linearized_transpose
 
 # This partial eval rule doesn't lives here because it needs batching.py.
 def _partial_eval_custom_call(trace, call_primitive, fun, tracers, params):
-  # If we hit partial evaluation for staging-out, there was no differentiation
-  # to trigger the custom jvp/vjp rule, so we can ignore res (like impl).
-  assert params['keep_res'] is False
-  bdims, stores = params.pop('bdims', ()), params.pop('stores', ())
+  bdims, stores = params.get('bdims', ()), params.get('stores', ())
   out_bdims = []
   for bd_in in bdims:
     fun, bd_out = batching.batch_fun2(fun, True, bd_in)
     out_bdims.append(bd_out)
-  outs = fun.call_wrapped(*tracers, keep_res=False)
+  outs = fun.call_wrapped(*tracers, keep_res=params['keep_res'])
   for bd_out, s in zip(out_bdims, stores):
     s.store(bd_out())
   return outs

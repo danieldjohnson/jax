@@ -341,9 +341,8 @@ class JVPTrace(Trace):
     return out, todo
 
   def process_custom_call(self, call_primitive, fun, tracers, params):
-    assert params.pop('keep_res') is False
     primals_in, tangents_in = unzip2((t.primal, t.tangent) for t in tracers)
-    outs = call_primitive.impl(fun, *primals_in, keep_res=True, **params)
+    outs = call_primitive.bind(fun, *primals_in, **dict(params, keep_res=True))
     ans_tree, res_tree, num_res = params['out_data']()
     res, primals_out = split_list(outs, [num_res])
     bdims_res, bdims_out = unzip2([split_list(s.val, [num_res])
