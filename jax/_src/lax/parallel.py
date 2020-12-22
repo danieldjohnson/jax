@@ -358,6 +358,64 @@ def pdot(x, y, axis_name, pos_contract=((), ())):
   return pdot_p.bind(x, y, axis_name=axis_name,
                      pos_contract=pos_contract, pos_batch=[(), ()])
 
+def all_gather(x, axis_name, *, all_gather_dimension: int = 0, axis_index_groups=None):
+  """Gather values of x across all replicas.
+
+  If ``x`` is a pytree then the result is equivalent to mapping this function to
+  each leaf in the tree.
+
+  This is equivalent to, but faster than, all_to_all(broadcast(x)).
+
+  Args:
+    x: array(s) with a mapped axis named ``axis_name``.
+    axis_name: hashable Python object used to name a pmapped axis (see the
+      :func:`jax.pmap` documentation for more details).
+    all_gather_dimension: where to insert the new axis.
+    axis_index_groups: optional list of lists containing axis indices (e.g. for
+      an axis of size 4, [[0, 1], [2, 3]] would run all gather over the first
+      two and last two replicas). Groups must cover all axis indices exactly
+      once, and all groups must be the same size.
+
+  Returns:
+    Array(s) representing the result of an all-gather along the axis
+    ``axis_name``. Shapes are the same as ``x.shape``, but with a new axis
+    insterted at ``all_gather_dimension``.
+
+  For example, with 4 XLA devices available:
+
+  >>> x = np.arange(4)
+  >>> y = jax.pmap(lambda x: jax.lax.all_gather(x, 'i'), axis_name='i')(x)
+  >>> print(y)
+  [[0 1 2 3]
+   [0 1 2 3]
+   [0 1 2 3]
+   [0 1 2 3]]
+
+  An example of using axis_index_groups, groups split by even & odd device ids:
+
+  >>> x = np.arange(16).reshape(4, 4)
+  >>> print(x)
+  [[ 0.  1.  2.  3.]
+   [ 4.  5.  6.  7.]
+   [ 8.  9. 10. 11.]
+   [12. 13. 14. 15.]]
+  >>> y = jax.pmap(lambda x: jax.lax.all_gather(
+  ... x, 'i', axis_index_groups=[[0, 2], [3, 1]]))(x)
+  >>> print(y)
+  [[[ 0.  1.  2.  3.]
+    [ 8.  9. 10. 11.]]
+   [[12. 13. 14. 15.]
+    [ 4.  5.  6.  7.]]
+   [[ 0.  1.  2.  3.]
+    [ 8.  9. 10. 11.]]
+   [[12. 13. 14. 15.]
+    [ 4.  5.  6.  7.]]
+  """
+  axis_size = psum(1, axis_name, axis_index_groups=axis_index_groups)
+  return tree_util.tree_map(partial(all_gather_p.bind,
+      axis_name=axis_name, axis_size=axis_size,
+      all_gather_dimension=all_gather_dimension,
+      axis_index_groups=axis_index_groups), x)
 
 ### parallel primitives
 
@@ -664,80 +722,6 @@ batching.primitive_batchers[all_to_all_p] = _all_to_all_batcher
 batching.collective_rules[all_to_all_p] = _all_to_all_batched_collective
 
 
-def _expand(dim, size, index, x):
-  shape = list(x.shape)
-  shape.insert(dim, size)
-  out = lax.full(shape, lax._const(x, 0))
-  return lax.dynamic_update_index_in_dim(out, x, index, dim)
-
-def _allgather(x, dim, size, index, axis_name, axis_index_groups=None):
-  outs = tree_util.tree_map(partial(_expand, dim, size, index), x)
-  return psum(outs, axis_name, axis_index_groups=axis_index_groups)
-
-def all_gather(x, axis_name, *, axis_index_groups=None):
-  """Gather values of x across all replicas.
-
-  If ``x`` is a pytree then the result is equivalent to mapping this function to
-  each leaf in the tree.
-
-  This is equivalent to, but faster than, all_to_all(broadcast(x)).
-
-  Args:
-    x: array(s) with a mapped axis named ``axis_name``.
-    axis_name: hashable Python object used to name a pmapped axis (see the
-      :func:`jax.pmap` documentation for more details).
-    axis_index_groups: optional list of lists containing axis indices (e.g. for
-      an axis of size 4, [[0, 1], [2, 3]] would run all gather over the first
-      two and last two replicas). Groups must cover all axis indices exactly
-      once, and all groups must be the same size.
-
-  Returns:
-    Array(s) representing the result of an all-gather along the axis
-    ``axis_name``. Shapes are the same as ``x.shape``, but with a leading
-    dimension of the axis_size.
-
-  For example, with 4 XLA devices available:
-
-  >>> x = np.arange(4)
-  >>> y = jax.pmap(lambda x: jax.lax.all_gather(x, 'i'), axis_name='i')(x)
-  >>> print(y)
-  [[0 1 2 3]
-   [0 1 2 3]
-   [0 1 2 3]
-   [0 1 2 3]]
-
-  An example of using axis_index_groups, groups split by even & odd device ids:
-
-  >>> x = np.arange(16).reshape(4, 4)
-  >>> print(x)
-  [[ 0.  1.  2.  3.]
-   [ 4.  5.  6.  7.]
-   [ 8.  9. 10. 11.]
-   [12. 13. 14. 15.]]
-  >>> y = jax.pmap(lambda x: jax.lax.all_gather(
-  ... x, 'i', axis_index_groups=[[0, 2], [3, 1]]))(x)
-  >>> print(y)
-  [[[ 0.  1.  2.  3.]
-    [ 8.  9. 10. 11.]]
-   [[12. 13. 14. 15.]
-    [ 4.  5.  6.  7.]]
-   [[ 0.  1.  2.  3.]
-    [ 8.  9. 10. 11.]]
-   [[12. 13. 14. 15.]
-    [ 4.  5.  6.  7.]]
-  """
-
-  index = axis_index(axis_name)
-  if axis_index_groups is not None:
-    indices = np.array(axis_index_groups).flatten()
-    axis_index_to_group_index = indices.argsort() % len(axis_index_groups[0])
-    index = lax_numpy.array(axis_index_to_group_index)[index]
-
-  axis_size = psum(1, axis_name, axis_index_groups=axis_index_groups)
-
-  return _allgather(x, 0, axis_size, index, axis_name, axis_index_groups)
-
-
 def _axis_index_translation_rule(c, *, axis_name, axis_env, platform):
   axis_pos = list(axis_env.names).index(axis_name)
   nreplicas = axis_env.nreps // prod(axis_env.sizes)
@@ -885,3 +869,79 @@ def omnistaging_disabler() -> None:
   axis_index_p.def_abstract_eval(
       lambda *args, **params: ShapedArray((), np.int32))
   xla.translations[axis_index_p] = _axis_index_translation_rule
+
+def _all_gather_via_psum(x, *, all_gather_dimension, axis_name, axis_size,
+                         axis_index_groups):
+  index = axis_index(axis_name)
+  if axis_index_groups is not None:
+    indices = np.array(axis_index_groups).flatten()
+    axis_index_to_group_index = indices.argsort() % len(axis_index_groups[0])
+    index = lax_numpy.array(axis_index_to_group_index)[index]
+
+  shape = list(x.shape)
+  shape.insert(all_gather_dimension, axis_size)
+  empty = lax.full(shape, lax._const(x, 0))
+  outs = lax.dynamic_update_index_in_dim(empty, x, index, all_gather_dimension)
+  return psum(outs, axis_name, axis_index_groups=axis_index_groups)
+
+def _all_gather_translation_rule(c, x, *, all_gather_dimension, axis_name,
+                                 axis_size, axis_index_groups, axis_env,
+                                 platform=None):
+  # TODO: lower to XLA AllGather HLO directly (#3431)
+  lowering = xla.lower_fun(_all_gather_via_psum, multiple_results=False, parallel=True)
+  return lowering(c, x,
+                  all_gather_dimension=all_gather_dimension, axis_name=axis_name,
+                  axis_size=axis_size, axis_index_groups=axis_index_groups,
+                  axis_env=axis_env, platform=platform)
+
+def _all_gather_transpose_rule(cts, *, all_gather_dimension, axis_name,
+                               axis_size, axis_index_groups):
+  sum_cts = psum(cts, axis_name=axis_name, axis_index_groups=axis_index_groups)
+  idx = axis_index(axis_name)
+  local_slice = lax.dynamic_index_in_dim(sum_cts, idx, all_gather_dimension, keepdims=False)
+  return (local_slice,)
+
+
+def _all_gather_batcher(vals_in, dims_in, *, all_gather_dimension, axis_name,
+                        axis_size, axis_index_groups):
+  x, = vals_in
+  d, = dims_in
+  if d <= all_gather_dimension:
+    # Insert the all_gather dimension after the mapped dimension.
+    all_gather_dimension += 1
+  else:
+    # Insert the all_gather dimension before the mapped dimension.
+    d += 1
+  result = all_gather_p.bind(
+      x,
+      all_gather_dimension=all_gather_dimension,
+      axis_name=axis_name,
+      axis_size=axis_size,
+      axis_index_groups=axis_index_groups)
+  return result, d
+
+def _all_gather_batched_collective(frame, vals_in, dims_in, *,
+                                   all_gather_dimension, axis_name,
+                                   axis_size, axis_index_groups):
+  if isinstance(axis_name, (list, tuple)) and len(axis_name) > 1:
+    raise NotImplementedError(
+        "all_gather with multiple axis names not supported in vmap collectives. "
+        "Please open a feature request!")
+  x, = vals_in
+  d, = dims_in
+  return _moveaxis(d, all_gather_dimension, x), batching.not_mapped
+
+def _all_gather_abstract_eval(x, *, all_gather_dimension, axis_name, axis_size,
+                              axis_index_groups):
+  shape, dtype = x.shape, x.dtype
+  new_shape = list(shape)
+  new_shape.insert(all_gather_dimension, axis_size)
+  return ShapedArray(new_shape, dtype)
+
+all_gather_p = core.Primitive('all_gather')
+all_gather_p.def_abstract_eval(_all_gather_abstract_eval)
+xla.parallel_translations[all_gather_p] = _all_gather_translation_rule
+ad.deflinear(all_gather_p, _all_gather_transpose_rule)
+pxla.multi_host_supported_collectives.add(all_gather_p)
+batching.primitive_batchers[all_gather_p] = _all_gather_batcher
+batching.collective_rules[all_gather_p] = _all_gather_batched_collective

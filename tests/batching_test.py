@@ -1161,6 +1161,41 @@ class BatchingTest(jtu.JaxTestCase):
     self.assertAllClose(x_bar, jnp.dot(z_bar, y.T))
     self.assertAllClose(y_bar, jnp.dot(x.T, z_bar))
 
+  @skipIf(not jax.config.omnistaging_enabled,
+          "vmap collectives only supported when omnistaging is enabled")
+  def testAllGather(self):
+    def f(x):
+      return lax.all_gather(x, axis_name='i')
+
+    x = jnp.arange(15).reshape((3, 5))
+    self.assertAllClose(vmap(f, axis_name='i', in_axes=1, out_axes=None)(x), x.T)
+
+  @skipIf(not jax.config.omnistaging_enabled,
+          "vmap collectives only supported when omnistaging is enabled")
+  def testBatchedAllGather(self):
+    def f(x):
+      return lax.all_gather(x, axis_name='i')
+
+    x = jnp.arange(15).reshape((3, 5))
+    res = vmap(vmap(f, axis_name='i', out_axes=None), axis_name='j')(x)
+    self.assertAllClose(res, x)
+
+    res = vmap(vmap(f, axis_name='j'), axis_name='i', out_axes=None)(x)
+    self.assertAllClose(res, x.T)
+
+  @skipIf(not jax.config.omnistaging_enabled,
+          "vmap collectives only supported when omnistaging is enabled")
+  def testAllGatherVjp(self):
+    def f(x):
+      return lax.all_gather(x, axis_name='i')
+
+    rng = np.random.RandomState(1)
+    x = rng.randn(3, 4)
+    y_bar = rng.randn(3, 3, 4)
+
+    x_bar, = vmap(lambda x, y_bar: vjp(f, x)[1](y_bar), axis_name='i')(x, y_bar)
+    self.assertAllClose(x_bar, np.sum(y_bar, axis=0))
+
 
 if __name__ == '__main__':
   absltest.main(testLoader=jtu.JaxTestLoader())
